@@ -1,12 +1,12 @@
 import argparse
+import gzip
 import matplotlib.pyplot as plt
+import os
 import pandas as pd
 import seaborn as sns
+import shutil
 import sys
 import urllib.request
-import pathlib
-import shutil
-import gzip
 
 TSV_FILES = [
     "title.basics.tsv",
@@ -14,12 +14,27 @@ TSV_FILES = [
     "title.ratings.tsv",
 ]
 
+
 def error(*args, **kwargs):
     print("[ERROR]", *args, **kwargs, file=sys.stderr)
 
 
 def info(*args, **kwargs):
     print("[INFO]", *args, **kwargs)
+
+
+def download_dataset():
+    for tsv in TSV_FILES:
+        gz = f"{tsv}.gz"
+        if not os.path.exists(gz):
+            info(f"Downloading {gz}")
+            urllib.request.urlretrieve(f"https://datasets.imdbws.com/{gz}", gz)
+
+        if not os.path.exists(tsv):
+            info(f"Decompressing {tsv} from {gz}")
+            with gzip.open(gz, "rb") as f_in, open(tsv, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
 
 def load_basics(usecols):
     info("Loading title.basics.tsv")
@@ -43,16 +58,7 @@ def load_basics(usecols):
     )
 
 def main(args):
-    # urllib.request.urlretrieve
-    for tsv in TSV_FILES:
-        if pathlib.Path(tsv).exists():
-            continue
-        gz = f"{tsv}.gz"
-        info(f"Downloading {gz}")
-        urllib.request.urlretrieve(f"https://datasets.imdbws.com/{gz}", gz)
-        info(f"Decompressing {tsv} from {gz}")
-        with gzip.open(gz, 'rb') as f_in, open(tsv, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    download_dataset()
 
     title = None
 
@@ -78,7 +84,7 @@ def main(args):
                 break
 
         chosen = matched.index[chosen]
-        title  = matched.at[chosen, 'primaryTitle']
+        title = matched.at[chosen, "primaryTitle"]
     elif args.id is not None:
         chosen = args.id
     else:
@@ -86,7 +92,7 @@ def main(args):
         exit(2)
 
     if title is None:
-        title = load_basics(usecols=[0, 2]).at[chosen, 'primaryTitle']
+        title = load_basics(usecols=[0, 2]).at[chosen, "primaryTitle"]
 
     info("Loading episode titles")
     episode = pd.read_csv(
@@ -103,23 +109,24 @@ def main(args):
     )
 
     info("Loading ratings")
-    ratings = pd.read_csv("title.ratings.tsv", sep="\t", dtype={
-        "tconst": "string",
-        "averageRating": "Float32",
-        "numVotes": "Int64"
-    }, index_col=0)
+    ratings = pd.read_csv(
+        "title.ratings.tsv",
+        sep="\t",
+        dtype={"tconst": "string", "averageRating": "Float32", "numVotes": "Int64"},
+        index_col=0,
+    )
 
     episodes_rated = episode[episode["parentTconst"] == chosen].join(ratings)
 
     plt.title(title)
 
     if args.box:
-        sns.boxplot(x='seasonNumber', y='averageRating', data=episodes_rated)
+        sns.boxplot(x="seasonNumber", y="averageRating", data=episodes_rated)
         plt.xlabel("Season number")
         plt.ylabel("Average episode rating")
         plt.show()
     elif args.episodes:
-        sns.lineplot(x='episodeNumber', y='averageRating', data=episodes_rated)
+        sns.lineplot(x="episodeNumber", y="averageRating", data=episodes_rated)
         plt.xlabel("Episode number")
         plt.ylabel("Average episode rating")
         plt.show()
