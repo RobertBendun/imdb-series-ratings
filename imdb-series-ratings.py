@@ -1,9 +1,18 @@
 import argparse
-import sys
+import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-import matplotlib.pyplot as plt
+import sys
+import urllib.request
+import pathlib
+import shutil
+import gzip
 
+TSV_FILES = [
+    "title.basics.tsv",
+    "title.episode.tsv",
+    "title.ratings.tsv",
+]
 
 def error(*args, **kwargs):
     print("[ERROR]", *args, **kwargs, file=sys.stderr)
@@ -33,8 +42,18 @@ def load_basics(usecols):
         usecols=usecols,
     )
 
-
 def main(args):
+    # urllib.request.urlretrieve
+    for tsv in TSV_FILES:
+        if pathlib.Path(tsv).exists():
+            continue
+        gz = f"{tsv}.gz"
+        info(f"Downloading {gz}")
+        urllib.request.urlretrieve(f"https://datasets.imdbws.com/{gz}", gz)
+        info(f"Decompressing {tsv} from {gz}")
+        with gzip.open(gz, 'rb') as f_in, open(tsv, 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out)
+
     title = None
 
     if args.name is not None:

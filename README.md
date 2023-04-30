@@ -5,7 +5,6 @@ Using [IMDb dataset](https://www.imdb.com/interfaces/) to create some stats abou
 ## Example
 
 ```console
-$ make
 $ poetry run python ./imdb-series-ratings.py -i 'tt3107288' --box
 ```
 
