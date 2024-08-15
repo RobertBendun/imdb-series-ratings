@@ -6,32 +6,31 @@ import gzip
 import itertools
 import matplotlib.pyplot as plt
 import os
-import pandas as pd
 import seaborn as sns
+import pandas as pd
 import shutil
 import sys
 import urllib.request
-
-TSV_FILES = [
-    "title.basics.tsv",
-    "title.episode.tsv",
-    "title.ratings.tsv",
-]
+import duckdb
 
 verbosity_level = 0
 
+TABLES = (
+    ("title.basics.tsv", "basics"),
+    ("title.episode.tsv", "episode"),
+    ("title.ratings.tsv", "ratings"),
+)
 
 def error(*args, **kwargs):
-    print("[ERROR]", *args, **kwargs, file=sys.stderr)
+    print("[ERROR]", *args, **kwargs, file=sys.stderr, flush=True)
 
 
 def info(*args, **kwargs):
     if verbosity_level > 0:
-        print("[INFO]", *args, **kwargs)
-
+        print("[INFO]", *args, **kwargs, flush=True)
 
 def download_dataset():
-    for tsv in TSV_FILES:
+    for tsv, _ in TABLES:
         gz = f"{tsv}.gz"
         if not os.path.exists(gz):
             info(f"Downloading {gz}")
@@ -43,29 +42,17 @@ def download_dataset():
                 shutil.copyfileobj(f_in, f_out)
 
 
-def load_basics(usecols=None):
-    info("Loading title.basics.tsv")
-    return pd.read_table(
-        "title.basics.tsv",
-        dtype={
-            "tconst": str,
-            "titleType": str,
-            "primaryTitle": str,
-            "originalTitle": str,
-            "isAdult": str,
-            "startYear": "Int64",
-            "endYear": "Int64",
-            "runtimeMinutes": "Int64",
-            "genres": "object",
-        },
-        header=0,
-        na_values={"\\N"},
-        index_col=0,
-        low_memory=False,
-        usecols=usecols,
-        keep_default_na=False,
-        quoting=csv.QUOTE_NONE,
-    )
+def load_tables():
+    for file, table in TABLES:
+        duckdb.sql(
+            r"""
+            CREATE TABLE {table} AS
+            SELECT *
+            FROM read_csv('{file}', delim = '\t', header=true, quote=NULL, nullstr='\N')
+        """.format(
+                table=table, file=file
+            )
+        )
 
 
 def resolve_imdb_id_and_title(args) -> tuple[str, str]:
@@ -73,11 +60,15 @@ def resolve_imdb_id_and_title(args) -> tuple[str, str]:
     title_required = args.mode in ("box", "episodes")
 
     if args.name is not None:
-        basics = load_basics(usecols=[0, 1, 2, 5, 6])
-
-        matched = basics[
-            (basics["primaryTitle"] == args.name) & (basics["titleType"] == "tvSeries")
-        ]
+        duckdb.execute(
+            r"""
+            SELECT tconst, primaryTitle, startYear, endYear
+            FROM basics
+            WHERE primaryTitle == ? AND titleType == 'tvSeries'
+        """,
+            [args.name],
+        )
+        matched = duckdb.fetchall()
 
         info(f"Matched {len(matched)} title" + ("" if len(matched) == 0 else "s"))
         chosen = 0 if len(matched) == 1 else None
@@ -93,16 +84,15 @@ def resolve_imdb_id_and_title(args) -> tuple[str, str]:
                 chosen = chosen_ - 1
                 break
 
-        chosen = matched.index[chosen]
-        title = matched.at[chosen, "primaryTitle"]
-        return (chosen, title)
+        return matched[chosen][:2]
     elif args.id is not None:
-        chosen = args.id
         if title_required:
-            title = load_basics(usecols=[0, 2]).at[chosen, "primaryTitle"]
-            return (chosen, title)
+            duckdb.execute(
+                "SELECT tconst, primaryTitle FROM basics WHERE tconst = ?", [args.id]
+            )
+            return duckdb.fetchone()
         else:
-            return (chosen, None)
+            return (args.id, None)
     else:
         error("Expected either --id or --name")
         exit(2)
@@ -140,67 +130,67 @@ def collapse_years(years: list[int]) -> str:
 
 def main(args):
     download_dataset()
-    id, title = resolve_imdb_id_and_title(args)
+    load_tables()
 
-    info("Loading episode titles")
-    episode = pd.read_csv(
-        "title.episode.tsv",
-        sep="\t",
-        dtype={
-            "tconst": str,
-            "parentTconst": str,
-            "seasonNumber": "Int64",
-            "episodeNumber": "Int64",
-        },
-        na_values={"\\N"},
-        index_col=0,
-        low_memory=False,
-    )
-
-    if args.mode in ("box", "episodes"):
-        # TODO: Code smell
-        info("Loading ratings")
-        ratings = pd.read_csv(
-            "title.ratings.tsv",
-            sep="\t",
-            dtype={"tconst": "string", "averageRating": "Float32", "numVotes": "Int64"},
-            index_col=0,
-            low_memory=False,
-        )
+    tconst, title = resolve_imdb_id_and_title(args)
 
     if args.mode == "box":
-        episodes_rated = episode[episode["parentTconst"] == id].join(ratings)
+        duckdb.execute(
+            """
+            SELECT seasonNumber, averageRating
+            FROM episode e
+            INNER JOIN ratings r ON e.tconst = r.tconst
+            WHERE parentTconst = ?
+        """,
+            [tconst],
+        )
+        episodes_rated = duckdb.fetch_df()
         plt.title(title)
         sns.boxplot(x="seasonNumber", y="averageRating", data=episodes_rated)
         plt.xlabel("Season number")
         plt.ylabel("Average episode rating")
         plt.show()
     elif args.mode == "episodes":
-        episodes_rated = episode[episode["parentTconst"] == id].join(ratings)
+        duckdb.execute(
+            """
+            SELECT episodeNumber, averageRating
+            FROM episode e
+            INNER JOIN ratings r ON e.tconst = r.tconst
+            WHERE parentTconst = ?
+        """,
+            [tconst],
+        )
+        episodes_rated = duckdb.fetch_df()
         plt.title(title)
         sns.lineplot(x="episodeNumber", y="averageRating", data=episodes_rated)
         plt.xlabel("Episode number")
         plt.ylabel("Average episode rating")
         plt.show()
     elif args.mode == "completion":
-        episode = episode[episode["parentTconst"] == id]
-        basics = load_basics(usecols=[0, 5, 7])
-        episode = basics.join(episode, how="inner")
+        duckdb.execute(
+            """
+            SELECT b.tconst as tconst, seasonNumber, episodeNumber, runtimeMinutes, startYear
+            FROM basics b INNER JOIN episode e ON b.tconst = e.tconst
+            WHERE parentTconst = ?
+        """,
+            [tconst],
+        )
+        episodes = duckdb.fetch_df()
 
-        episodes_in_season = episode[
-            (episode["seasonNumber"] == args.season)
-            & (episode["episodeNumber"] >= args.episode)
+        episodes_in_season = episodes[
+            (episodes["seasonNumber"] == args.season)
+            & (episodes["episodeNumber"] >= args.episode)
         ]
-        next_seasons = episode[episode.fillna(0)["seasonNumber"] > args.season]
+        next_seasons = episodes[episodes.fillna(0)["seasonNumber"] > args.season]
         episodes_left = pd.concat([episodes_in_season, next_seasons])
 
         episodes_left_count = episodes_left["episodeNumber"].shape[0]
-        episodes_count = episode.shape[0]
+        episodes_count = episodes.shape[0]
 
-        total_runtime = episode["runtimeMinutes"].sum()
+        total_runtime = episodes["runtimeMinutes"].sum()
         remaining_runtime = episodes_left["runtimeMinutes"].sum()
 
-        years = sorted(episode["startYear"].dropna().unique())
+        years = sorted(episodes["startYear"].dropna().unique())
 
         print(
             f"Completed {episodes_count - episodes_left_count} episodes"
